@@ -47,23 +47,70 @@ from typing import Iterable, List, Dict, Set
 
 import requests
 
-# Address details; adjust these constants if you need to monitor a
-# different property.  Keep the street name exactly as it appears in
-# the DSNY dataset (all uppercase with a trailing "STREET").
+# Address details
+#
+# The script supports monitoring a single address or multiple addresses.  If
+# ``TICKET_ADDRESSES`` is defined in the environment, it should contain
+# one or more street addresses separated by semicolons or newlines.  Each
+# address string must include a house number followed by the street name
+# (e.g. ``"1407 Overing Street"``).  The street portion should match
+# exactly how it appears in the DSNY dataset (usually all uppercase
+# with a trailing descriptor like ``STREET`` or ``AVENUE``).  When
+# ``TICKET_ADDRESSES`` is not set, the script falls back to the
+# single ``OATH_ADDRESS_HOUSE``/``OATH_ADDRESS_STREET`` variables.
 ADDRESS_HOUSE = os.environ.get("OATH_ADDRESS_HOUSE", "1407")
 ADDRESS_STREET = os.environ.get("OATH_ADDRESS_STREET", "OVERING STREET")
+
+def parse_addresses() -> List[Dict[str, str]]:
+    """Parse the configured addresses from the environment.
+
+    Returns a list of dictionaries with ``house`` and ``street`` keys.
+    When ``TICKET_ADDRESSES`` is defined, it is split on semicolons
+    and newlines to produce individual address strings.  Each address
+    string is split on whitespace; the first token is taken as the
+    house number and the remainder (joined back together) is treated as
+    the street name.  If no multi‑address string is configured, a
+    single entry containing ``ADDRESS_HOUSE`` and ``ADDRESS_STREET`` is
+    returned.
+    """
+    multi = os.environ.get("TICKET_ADDRESSES")
+    addresses: List[Dict[str, str]] = []
+    if multi:
+        # split by semicolon or newline, and filter out empty strings
+        for raw in [part.strip() for part in multi.replace("\n", ";").split(";")]:
+            if not raw:
+                continue
+            parts = raw.split()
+            if len(parts) < 2:
+                # Skip invalid entries
+                continue
+            house = parts[0]
+            street = " ".join(parts[1:]).upper()
+            addresses.append({"house": house, "street": street})
+    if not addresses:
+        # fall back to single address from OATH_ADDRESS_HOUSE/STREET
+        addresses.append({"house": ADDRESS_HOUSE, "street": ADDRESS_STREET})
+    return addresses
 
 # Base URL for the DSNY Sanitation OATH database.  See
 # https://data.cityofnewyork.us for documentation.
 DATASET_URL = "https://data.cityofnewyork.us/resource/r78k-82m3.json"
 
 
-def fetch_tickets() -> List[Dict[str, str]]:
-    """Fetch all tickets for the configured address.
+def fetch_tickets(house: str, street: str) -> List[Dict[str, str]]:
+    """Fetch all DSNY OATH tickets for a given address.
 
-    Returns a list of dictionaries, each representing a single record
-    from the DSNY dataset.  The records are sorted by violation date
-    descending so that the newest ticket appears first.
+    Parameters
+    ----------
+    house : str
+        The house number of the property.
+    street : str
+        The street name as it appears in the DSNY dataset.
+
+    Returns
+    -------
+    List[Dict[str, str]]
+        A list of ticket records sorted by violation date descending.
 
     Raises
     ------
@@ -71,8 +118,8 @@ def fetch_tickets() -> List[Dict[str, str]]:
         If the network request fails or returns a non‑200 status code.
     """
     query = (
-        f"violation_location_house='{ADDRESS_HOUSE}' AND "
-        f"violation_location_street_name='{ADDRESS_STREET}'"
+        f"violation_location_house='{house}' AND "
+        f"violation_location_street_name='{street}'"
     )
     params = {
         "$where": query,
@@ -160,18 +207,28 @@ def send_email(new_tickets: List[Dict[str, str]]) -> None:
         )
         return
 
-    subject = f"New DSNY OATH tickets for {ADDRESS_HOUSE} {ADDRESS_STREET}"
-    lines = [
-        f"The following new DSNY OATH tickets have been issued for {ADDRESS_HOUSE} {ADDRESS_STREET}:",
-        ""
-    ]
+    # Compose subject and body.  If multiple addresses are being
+    # monitored, omit the address from the subject and include it in
+    # each bullet point.
+    # Determine if multiple addresses are configured by checking
+    # whether there are distinct address annotations on the new
+    # tickets.
+    addresses = {ticket.get("_address") for ticket in new_tickets if ticket.get("_address")}
+    if len(addresses) == 1:
+        addr_str = next(iter(addresses))
+        subject = f"New DSNY OATH tickets for {addr_str}"
+        lines = [f"The following new DSNY OATH tickets have been issued for {addr_str}:", ""]
+    else:
+        subject = "New DSNY OATH tickets detected"
+        lines = ["The following new DSNY OATH tickets have been issued:", ""]
     for ticket in new_tickets:
         violation_date = ticket.get("violation_date", "Unknown Date")
         description = ticket.get("charge_1_code_description", "")
         status = ticket.get("hearing_status", "")
         ticket_number = ticket.get("ticket_number", "")
+        addr = ticket.get("_address", f"{ADDRESS_HOUSE} {ADDRESS_STREET}")
         lines.append(
-            f"• Ticket {ticket_number} on {violation_date[:10]}: {description} (Status: {status})"
+            f"• {addr}: Ticket {ticket_number} on {violation_date[:10]} – {description} (Status: {status})"
         )
     body = "\n".join(lines)
 
@@ -206,19 +263,32 @@ def main() -> None:
     # Load previously known ticket numbers
     known_tickets = load_known_tickets(known_file)
 
-    try:
-        current_records = fetch_tickets()
-    except Exception as e:
-        print(f"Error fetching tickets: {e}")
-        return
+    # Collect current records across all configured addresses
+    current_records: List[Dict[str, str]] = []
+    addresses = parse_addresses()
+    for addr in addresses:
+        house = addr["house"]
+        street = addr["street"]
+        try:
+            records = fetch_tickets(house, street)
+        except Exception as e:
+            print(f"Error fetching tickets for {house} {street}: {e}")
+            continue
+        # annotate each record with its address for later use
+        for rec in records:
+            rec["_address"] = f"{house} {street}"
+        current_records.extend(records)
 
+    # Compute set of ticket numbers from all addresses
     current_ticket_numbers: Set[str] = {
-        record.get("ticket_number") for record in current_records if record.get("ticket_number")
+        record.get("ticket_number")
+        for record in current_records
+        if record.get("ticket_number")
     }
     new_ticket_numbers = current_ticket_numbers - known_tickets
 
     if new_ticket_numbers:
-        # Build list of new ticket records preserving order from the API
+        # Build list of new ticket records preserving order
         new_records = [
             record
             for record in current_records

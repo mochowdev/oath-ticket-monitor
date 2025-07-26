@@ -37,8 +37,12 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          FROM_EMAIL: ${{ secrets.MAIL_FROM }}
+          TO_EMAIL: ${{ secrets.MAIL_TO }}
+          # Provide a list of addresses (semicolon or newline separated) to monitor.
+          # If this variable is not defined, the script falls back to
+          # OATH_ADDRESS_HOUSE and OATH_ADDRESS_STREET.
+          TICKET_ADDRESSES: ${{ secrets.TICKET_ADDRESS }}
         run: |
           python check_oath_tickets.py
 
