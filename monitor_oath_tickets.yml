@@ -1,0 +1,55 @@
+name: Monitor OATH tickets for 1407 Overing Street
+
+on:
+  # Schedule the workflow to run every day at 10:00 Eastern (14:00 UTC)
+  schedule:
+    - cron: '0 14 * * *'
+  # Allow manual triggering from the GitHub UI
+  workflow_dispatch:
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository so we can read/write the known_tickets.json file
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      # Install Python dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --no-cache-dir requests
+
+      # Run the monitoring script.  Environment variables for SMTP
+      # and email addresses must be configured as repository or
+      # organization secrets.  The address constants can be
+      # overridden by setting OATH_ADDRESS_HOUSE and
+      # OATH_ADDRESS_STREET if needed.
+      - name: Check for new OATH tickets
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+        run: |
+          python check_oath_tickets.py
+
+      # Commit the updated known_tickets.json file if changes
+      - name: Persist updated ticket list
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add known_tickets.json
+            git commit -m "Update known tickets list"
+            git push
+          else
+            echo "No changes to commit."
